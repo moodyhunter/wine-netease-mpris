@@ -1,16 +1,15 @@
-import subprocess
-from time import sleep
-import Xlib
 from mpris_server.adapters import MprisAdapter
 from mpris_server.base import PlayState, Track, Position, Rate, Volume
 from mpris_server.events import EventAdapter
 from mpris_server.server import Server
 from mpris_server import MetadataObj
 
+import Xlib
 import Xlib.display as display
-from Xlib.xobject.drawable import Window
+import Xlib.xobject.drawable as drawable
 import Xlib.protocol.event as event
-from Xlib.ext.xtest import fake_input
+
+import subprocess
 
 KEYCODE_NEXT = 171
 KEYCODE_PLAYPAUSE = 172
@@ -28,7 +27,7 @@ def sendkey(keycode):
     ev = event.KeyRelease(window=WINDOW, type=Xlib.X.KeyRelease, detail=keycode, **keyword_args)
     WINDOW.send_event(ev, propagate=False)
     print('sendkey: ', keycode, 'to', hex(WINDOW.id))
-    DISPLAY.sync()
+    DISPLAY.flush()
 
 
 class WineNeteaseAdapter(MprisAdapter):
@@ -183,7 +182,7 @@ def gettitle(id):
 larger_wid = 0
 
 
-def try_this_window(window: Window):
+def try_this_window(window: drawable.Window):
     global WINDOW, larger_wid
 
     children = window.query_tree().children
