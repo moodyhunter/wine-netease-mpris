@@ -1,3 +1,7 @@
+import json
+import os
+import threading
+from time import sleep
 from mpris_server.adapters import MprisAdapter
 from mpris_server.base import PlayState, Track, Position, Rate, Volume
 from mpris_server.events import EventAdapter
@@ -9,6 +13,7 @@ import Xlib.display as display
 import Xlib.xobject.drawable as drawable
 import Xlib.protocol.event as event
 
+import sqlite3
 import subprocess
 
 KEYCODE_NEXT = 171
@@ -16,18 +21,91 @@ KEYCODE_PLAYPAUSE = 172
 KEYCODE_PREVIOUS = 173
 KEYCODE_STOP = 174
 
-WINDOW = None
 DISPLAY = display.Display()
+ROOT_WINDOW = DISPLAY.screen().root
+
+
+class TrackInfo:
+    def __init__(self, rowid, playtime, trackid, picurl, name, albumname, artists):
+        self.rowid = rowid
+        self.playtime = playtime
+        self.trackid = trackid
+        self.picurl = picurl
+        self.name = name
+        self.albumname = albumname
+        self.artists = artists
+
+
+TRACKINFO = TrackInfo(0, 0, 0, '', '', '', [])
+
+
+def get_netease_windows(window: drawable.Window):
+    global WINDOW
+    candidates = []
+
+    children = window.query_tree().children
+    for c in children:
+        candidates += get_netease_windows(c)
+
+    c = window.get_wm_class()
+    if c is None:
+        return candidates
+
+    wClass1, wClass2 = c
+    if wClass1 != "cloudmusic.exe":
+        return candidates
+
+    wName = window.get_property(Xlib.Xatom.WM_NAME, 0, 0, 100000000)
+    val = wName.value
+    if ' - ' not in str(val):
+        return candidates
+
+    # print(hex(window.id), wClass1, wClass2)
+
+    candidates.append(window)
+    return candidates
 
 
 def sendkey(keycode):
-    keyword_args = {'time': 0, 'root': 0, 'same_screen': 0, 'child': 0, 'root_x': 0, 'root_y': 0, 'event_x': 0, 'event_y': 0, 'state': 0}
-    ev = event.KeyPress(window=WINDOW, type=Xlib.X.KeyPress, detail=keycode, **keyword_args)
-    WINDOW.send_event(ev, propagate=False)
-    ev = event.KeyRelease(window=WINDOW, type=Xlib.X.KeyRelease, detail=keycode, **keyword_args)
-    WINDOW.send_event(ev, propagate=False)
-    print('sendkey: ', keycode, 'to', hex(WINDOW.id))
-    DISPLAY.flush()
+    active_window_id = ROOT_WINDOW.get_full_property(
+        DISPLAY.intern_atom('_NET_ACTIVE_WINDOW'), Xlib.X.AnyPropertyType
+    ).value[0]
+
+    NETEASE_WINDOW_CANDIDATES = get_netease_windows(ROOT_WINDOW)
+
+    if not NETEASE_WINDOW_CANDIDATES:
+        print('No Netease window found')
+        return
+
+    isin = active_window_id in [w.id for w in NETEASE_WINDOW_CANDIDATES]
+    window = NETEASE_WINDOW_CANDIDATES[1]
+    print('Active window:', hex(active_window_id), 'Netease window:', hex(window.id), 'Is in:', isin, 'Sending key:', keycode)
+
+    kwargs = {'time': 0, 'root': 0, 'same_screen': 0, 'child': 0, 'root_x': 0, 'root_y': 0, 'event_x': 0, 'event_y': 0, 'state': 0}
+
+    def send_single_key_press(keycode):
+        ev = event.KeyPress(window=window, type=Xlib.X.KeyPress, detail=keycode, **kwargs)
+        window.send_event(ev, propagate=False)
+        DISPLAY.flush()
+
+    def send_single_key_release(keycode):
+        ev = event.KeyRelease(window=window, type=Xlib.X.KeyRelease, detail=keycode, **kwargs)
+        window.send_event(ev, propagate=False)
+        DISPLAY.flush()
+
+    if isin:
+        send_single_key_release(37)  # Left Ctrl
+        send_single_key_release(50)  # Left Shift
+        send_single_key_release(38)  # Left A
+
+    send_single_key_press(keycode)
+    sleep(0.1)
+    send_single_key_release(keycode)
+
+    if isin:
+        send_single_key_press(37)  # Left Ctrl
+        send_single_key_press(50)  # Left Shift
+        send_single_key_press(38)  # Left A
 
 
 class WineNeteaseAdapter(MprisAdapter):
@@ -35,19 +113,12 @@ class WineNeteaseAdapter(MprisAdapter):
 
     # Make sure to implement all methods on MprisAdapter, not just metadata()
     def metadata(self) -> MetadataObj:
-        print("query metadata")
-
-        title = gettitle(WINDOW.id)
-        if ' - ' in title:
-            artist, title = title.split(' - ', 1)
-        else:
-            artist = ''
-
         metadata = MetadataObj(
-            artists=[artist],
-            title=title,
-            album='',
+            artists=TRACKINFO.artists,
+            title=TRACKINFO.name,
+            album=TRACKINFO.albumname,
             length=0,
+            art_url=TRACKINFO.picurl,
         )
 
         return metadata
@@ -161,14 +232,8 @@ class WineNeteaseAdapter(MprisAdapter):
 
 
 class WineNeteaseEventHandler(EventAdapter):
-    # EventAdapter has good default implementations for its methods.
-    # Only override the default methods if it suits your app.
-
-    def on_app_event(self, event: str):
-        print(event)
-        # trigger DBus updates based on events in your app
-        if event == 'pause':
-            self.on_playpause()
+    def on_app_event(self):
+        self.on_title()
 
     # and so on
 
@@ -179,48 +244,34 @@ def gettitle(id):
                             stderr=subprocess.DEVNULL).communicate()[0].decode("utf-8").strip().split("=")[1].strip()[1:-1]
 
 
-larger_wid = 0
+def timerevent():
+    LATEST_TRACK_QUERY = 'SELECT "_rowid_", * FROM "historyTracks" ORDER BY "playtime" DESC LIMIT 1;'
+    DRIVE_C_PATH = os.environ['HOME'] + '/.deepinwine/Spark-CloudMusic/drive_c'
+    USERNAME = os.environ['USER']
+    WEBDB_PATH = f'{DRIVE_C_PATH}/users/{USERNAME}/Local Settings/Application Data/NetEase/CloudMusic/Library/webdb.dat'
+
+    global TRACKINFO
+
+    conn = sqlite3.connect(WEBDB_PATH)
+    c = conn.cursor()
+
+    prev_rowid = 0
+
+    while True:
+        c.execute(LATEST_TRACK_QUERY)
+        rid, ptime, tid, info = c.fetchone()
+        if rid != prev_rowid:
+            info = json.loads(info)
+            artists = [artist['name'] for artist in info['artists']]
+            TRACKINFO = TrackInfo(rid, ptime, tid, info['album']['picUrl'], info['name'], info['album']['albumName'], artists)
+            prev_rowid = rid
+            event_handler.on_app_event()
+        else:
+            sleep(1)
 
 
-def try_this_window(window: drawable.Window):
-    global WINDOW, larger_wid
+threading.Thread(target=timerevent).start()
 
-    children = window.query_tree().children
-    for c in children:
-        if not try_this_window(c):
-            continue
-
-    c = window.get_wm_class()
-    if c is None:
-        return False
-
-    wClass1, wClass2 = c
-    if wClass1 != "cloudmusic.exe":
-        return False
-
-    wName = window.get_property(Xlib.Xatom.WM_NAME, 0, 0, 100000000)
-    val = wName.value
-    if ' - ' not in str(val):
-        return False
-
-    print(hex(window.id), wClass1, wClass2, wName, window.get_geometry())
-
-    if larger_wid < window.id:
-        larger_wid = window.id
-        WINDOW = window
-
-    return True
-
-
-try_this_window(DISPLAY.screen().root)
-
-
-if WINDOW is None:
-    print("ERROR: window not found")
-    exit(1)
-
-print("OK: ", hex(WINDOW.id), "title: ", gettitle(WINDOW.id))
-# sendkey(KEYCODE_PLAYPAUSE)
 
 adapter = WineNeteaseAdapter()
 mpris = Server('Wine Netease', adapter=adapter)
