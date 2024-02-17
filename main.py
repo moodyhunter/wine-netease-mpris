@@ -1,3 +1,4 @@
+import signal
 import json
 import os
 import threading
@@ -24,19 +25,28 @@ KEYCODE_STOP = 174
 DISPLAY = display.Display()
 ROOT_WINDOW = DISPLAY.screen().root
 
+SIGINT_RCVD = False
+
 
 class TrackInfo:
-    def __init__(self, rowid, playtime, trackid, picurl, name, albumname, artists):
-        self.rowid = rowid
-        self.playtime = playtime
-        self.trackid = trackid
-        self.picurl = picurl
-        self.name = name
-        self.albumname = albumname
-        self.artists = artists
+    def __init__(self, rid, ptime, tid, info):
+        self.rowid = rid
+        self.playtime = ptime
+        self.trackid = tid
+        self.picurl = info['album']['picUrl'] if 'album' in info else ''
+        self.name = info['name'] if 'name' in info else ''
+        self.albumname = info['album']['albumName'] if 'album' in info else ''
+        self.artists = [artist['name'] for artist in info['artists']] if 'artists' in info else []
+        self.raw_info = info
+
+    def __eq__(self, __value: object) -> bool:
+        if not isinstance(__value, TrackInfo):
+            return False
+
+        return self.rowid == __value.rowid and self.playtime == __value.playtime and self.trackid == __value.trackid
 
 
-TRACKINFO = TrackInfo(0, 0, 0, '', '', '', [])
+TRACKINFO = TrackInfo(-1, -1, -1, {})
 
 
 def get_netease_windows(window: drawable.Window):
@@ -255,20 +265,30 @@ def timerevent():
     conn = sqlite3.connect(WEBDB_PATH)
     c = conn.cursor()
 
-    prev_rowid = 0
-
     while True:
         c.execute(LATEST_TRACK_QUERY)
         rid, ptime, tid, info = c.fetchone()
-        if rid != prev_rowid:
-            info = json.loads(info)
-            artists = [artist['name'] for artist in info['artists']]
-            TRACKINFO = TrackInfo(rid, ptime, tid, info['album']['picUrl'], info['name'], info['album']['albumName'], artists)
-            prev_rowid = rid
+        track = TrackInfo(rid, ptime, tid, json.loads(info))
+
+        if TRACKINFO != track:
+            TRACKINFO = track
             event_handler.on_app_event()
         else:
             sleep(1)
 
+        if SIGINT_RCVD:
+            break
+
+
+def sigint_handler(signum, frame):
+    global SIGINT_RCVD
+    SIGINT_RCVD = True
+    print()
+    print('SIGINT received, exiting...')
+    exit(0)
+
+
+signal.signal(signal.SIGINT, sigint_handler)
 
 threading.Thread(target=timerevent).start()
 
