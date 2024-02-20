@@ -50,7 +50,6 @@ TRACKINFO = TrackInfo(-1, -1, -1, {})
 
 
 def get_netease_windows(window: drawable.Window):
-    global WINDOW
     candidates = []
 
     children = window.query_tree().children
@@ -77,9 +76,24 @@ def get_netease_windows(window: drawable.Window):
 
 
 def sendkey(keycode):
-    active_window_id = ROOT_WINDOW.get_full_property(
-        DISPLAY.intern_atom('_NET_ACTIVE_WINDOW'), Xlib.X.AnyPropertyType
-    ).value[0]
+    global DISPLAY, ROOT_WINDOW
+
+    while True:
+        try:
+            active_window_id = ROOT_WINDOW.get_full_property(
+                DISPLAY.intern_atom('_NET_ACTIVE_WINDOW'), Xlib.X.AnyPropertyType
+            )
+            print('Active window:', active_window_id)
+            break
+        except:
+            print('Reconnecting to X server')
+            DISPLAY = display.Display()
+            ROOT_WINDOW = DISPLAY.screen().root
+
+    if active_window_id is None:
+        active_window_id = 0
+    else:
+        active_window_id = active_window_id.value[0]
 
     NETEASE_WINDOW_CANDIDATES = get_netease_windows(ROOT_WINDOW)
 
@@ -244,14 +258,6 @@ class WineNeteaseAdapter(MprisAdapter):
 class WineNeteaseEventHandler(EventAdapter):
     def on_app_event(self):
         self.on_title()
-
-    # and so on
-
-
-def gettitle(id):
-    return subprocess.Popen(["xprop", "-id", str(id), "WM_NAME"],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL).communicate()[0].decode("utf-8").strip().split("=")[1].strip()[1:-1]
 
 
 def timerevent():
