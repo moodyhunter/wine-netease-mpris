@@ -1,4 +1,4 @@
-emoji==2.10.0
+emoji==2.10.1
 mpris-server==0.8.1
 pycairo==1.25.1
 pydbus==0.6.0
